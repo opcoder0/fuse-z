@@ -78,4 +78,7 @@ func main() {
 	defer c.Close()
 
 	err = fs.Serve(c, ZFuse{})
+	if err != nil {
+		log.Fatal(err)
+	}
 }
