@@ -1,2 +1,2 @@
-# fuse-z
+# zfuse
 Fuse filesystem for compressed files
