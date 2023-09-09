@@ -3,10 +3,12 @@ package main
 import (
 	"archive/zip"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"strings"
 	"syscall"
 
@@ -14,61 +16,122 @@ import (
 	"bazil.org/fuse/fs"
 )
 
-type ZFuse struct{}
-type ZDir struct {
-	fuse.Dirent
+type ZFuse struct {
+	source   *zip.ReadCloser
+	entries  map[string]*ZEntry
+	iEntries map[uint64]*ZEntry
 }
-type ZFile struct {
-	fuse.Dirent
-}
+
 type ZEntry struct {
-	ZFile
-	ZDir
+	zType fuse.DirentType
+	entry fuse.Dirent
 }
 
 var (
 	greeting = "Hello from the fuse file\n"
-	zfs      map[string]ZEntry
 )
 
-func (ZFuse) Root() (fs.Node, error) {
-	return ZDir{}, nil
+func (zf ZFuse) LoadZip() {
+	zf.entries = make(map[string]*ZEntry)
+	zf.iEntries = make(map[uint64]*ZEntry)
+	for _, f := range zf.source.File {
+		if strings.HasSuffix(f.Name, "/") {
+			parent := path.Dir(path.Dir(f.Name)) + "/"
+			name := path.Base(f.Name)
+			parentZE, ok := zf.entries[parent]
+			parentInode := uint64(0)
+			if ok {
+				parentInode = parentZE.entry.Inode
+			}
+			inode := fs.GenerateDynamicInode(parentInode, name)
+			ze := ZEntry{
+				zType: fuse.DT_Dir,
+				entry: fuse.Dirent{
+					Inode: inode,
+					Type:  fuse.DT_Dir,
+					Name:  name,
+				},
+			}
+			zf.entries[f.Name] = &ze
+			zf.iEntries[inode] = &ze
+		} else {
+			parent := path.Dir(f.Name) + "/"
+			name := path.Base(f.Name)
+			parentZE, ok := zf.entries[parent]
+			if !ok {
+				panic("Parent Inode information not found")
+			}
+			inode := fs.GenerateDynamicInode(parentZE.entry.Inode, name)
+			ze := ZEntry{
+				zType: fuse.DT_File,
+				entry: fuse.Dirent{
+					Inode: inode,
+					Type:  fuse.DT_File,
+					Name:  name,
+				},
+			}
+			zf.entries[f.Name] = &ze
+			zf.iEntries[inode] = &ze
+		}
+	}
 }
 
-func (zd ZDir) Attr(ctx context.Context, a *fuse.Attr) error {
-	a.Inode = 1
-	a.Mode = os.ModeDir | 0o555
+func (zf ZFuse) Root() (fs.Node, error) {
+
+	zf.LoadZip()
+	rootDir := ZEntry{
+		zType: fuse.DT_Dir,
+		entry: fuse.Dirent{
+			Inode: 0,
+			Type:  fuse.DT_Dir,
+			Name:  ".",
+		},
+	}
+	return &rootDir, nil
+}
+
+func (ze ZEntry) Attr(ctx context.Context, a *fuse.Attr) error {
+	switch ze.zType {
+	case fuse.DT_File:
+		a.Inode = ze.entry.Inode
+		a.Mode = 0o444
+		a.Size = uint64(len(greeting))
+		return nil
+	case fuse.DT_Dir:
+		a.Inode = 1
+		a.Mode = os.ModeDir | 0o555
+		return nil
+	default:
+		log.Println("Invalid entry type")
+		return errors.New("Invalid entry type")
+	}
+}
+
+func (ze ZEntry) Access(ctx context.Context, req *fuse.AccessRequest) error {
 	return nil
 }
 
-func (zd ZDir) Access(ctx context.Context, req *fuse.AccessRequest) error {
-	return nil
-}
-
-func (zd ZDir) Lookup(ctx context.Context, name string) (fs.Node, error) {
+func (zd ZEntry) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	if name == "hello" {
-		return ZFile{}, nil
+		return ZEntry{
+			zType: fuse.DT_File,
+		}, nil
 	}
 	return nil, syscall.ENOENT
 }
 
-func (zd ZDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	return dirs, nil
+func (ze ZEntry) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	// TODO return all entries under this path
+	return nil, nil
 }
 
-func (zf ZFile) Attr(ctx context.Context, a *fuse.Attr) error {
-	a.Inode = zf.Inode
-	a.Mode = 0o444
-	a.Size = uint64(len(greeting))
-	return nil
-}
-
-func (ZFile) Access(ctx context.Context, req *fuse.AccessRequest) error {
-	return nil
-}
-
-func (ZFile) ReadAll(ctx context.Context) ([]byte, error) {
-	return []byte(greeting), nil
+func (ze ZEntry) ReadAll(ctx context.Context) ([]byte, error) {
+	switch ze.zType {
+	case fuse.DT_File:
+		return []byte(greeting), nil
+	default:
+		return nil, errors.New("Read error not a regular file")
+	}
 }
 
 func main() {
@@ -90,24 +153,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer r.Close()
 
-	for _, f := range r.File {
-		if strings.HasSuffix(f.Name, "/") {
-			// directory
-			zDir := new(ZDir)
-			zDir.Inode = 0
-			zDir.Name = f.Name
-			zDir.Type = fuse.DT_Dir
-			dirs = append(dirs, *zDir)
-		} else {
-			// file
-		}
-		zDirent := new(fuse.Dirent)
-		zDirent.Inode = fs.GenerateDynamicInode(1, f.Name)
-		zDirent.Name = f.Name
-		zDirent.Type = fuse.DT_File
-		dirs = append(dirs, *zDirent)
+	// TODO handle close in ZFuse
+	defer r.Close()
+	zFuse := ZFuse{
+		source: r,
 	}
 
 	c, err := fuse.Mount(mountPoint, fuse.FSName("zfuse"), fuse.Subtype("zfuse"))
@@ -116,7 +166,7 @@ func main() {
 	}
 	defer c.Close()
 
-	err = fs.Serve(c, ZFuse{})
+	err = fs.Serve(c, zFuse)
 	if err != nil {
 		log.Fatal(err)
 	}
