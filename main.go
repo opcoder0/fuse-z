@@ -24,35 +24,42 @@ var dirs = []fuse.Dirent{
 	{Inode: 2, Name: "hello", Type: fuse.DT_File},
 }
 
-func (ZFuse) Root() (fs.Node, error) {
+func (zf ZFuse) Root() (fs.Node, error) {
+	log.Println("Root: zf = ", zf)
 	return ZDir{}, nil
 }
 
-func (ZDir) Attr(ctx context.Context, a *fuse.Attr) error {
+func (zd ZDir) Attr(ctx context.Context, a *fuse.Attr) error {
+	log.Println("Attr: zd = ", zd)
 	a.Inode = 1
 	a.Mode = os.ModeDir | 0o555
 	return nil
 }
 
-func (ZDir) Lookup(ctx context.Context, name string) (fs.Node, error) {
+func (zd ZDir) Lookup(ctx context.Context, name string) (fs.Node, error) {
+	log.Println("Lookup: zd = ", zd)
 	if name == "hello" {
 		return ZFile{}, nil
 	}
 	return nil, syscall.ENOENT
 }
 
-func (ZDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+func (zd ZDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	log.Println("ReadDirAll: zd = ", zd)
 	return dirs, nil
 }
 
-func (ZFile) Attr(ctx context.Context, a *fuse.Attr) error {
+func (zf ZFile) Attr(ctx context.Context, a *fuse.Attr) error {
+
+	log.Println("Attr: zf = ", zf)
 	a.Inode = 2
 	a.Mode = 0o444
 	a.Size = uint64(len(greeting))
 	return nil
 }
 
-func (ZFile) ReadAll(ctx context.Context) ([]byte, error) {
+func (zf ZFile) ReadAll(ctx context.Context) ([]byte, error) {
+	log.Println("ReadAll: zf = ", zf)
 	return []byte(greeting), nil
 }
 
