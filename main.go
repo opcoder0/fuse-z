@@ -14,88 +14,83 @@ import (
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
+	"github.com/opcoder0/zfuse/zfs"
 )
 
 type ZFuse struct {
-	source   *zip.ReadCloser
-	entries  map[string]*ZEntry
-	iEntries map[uint64]*ZEntry
+	source *zip.ReadCloser
+	tree   zfs.Tree[ZEntry]
 }
 
 type ZEntry struct {
-	zType fuse.DirentType
-	entry fuse.Dirent
+	Entry fuse.Dirent
+	FP    *zip.File
 }
 
-var (
-	greeting = "Hello from the fuse file\n"
-)
+func NewZEntry(parentInode uint64, name string, entType fuse.DirentType, fp *zip.File) ZEntry {
+	if entType != fuse.DT_Dir && entType != fuse.DT_File {
+		panic("unsupported directory entry type")
+	}
+	node := ZEntry{
+		Entry: fuse.Dirent{
+			Inode: fs.GenerateDynamicInode(parentInode, name),
+			Type:  entType,
+			Name:  name,
+		},
+		FP: fp,
+	}
+	return node
+}
 
-func (zf ZFuse) LoadZip() {
-	zf.entries = make(map[string]*ZEntry)
-	zf.iEntries = make(map[uint64]*ZEntry)
+func (zf *ZFuse) Load() {
+
+	var parent, name string
+
+	rootNode := NewZEntry(0, ".", fuse.DT_Dir, nil)
+	zf.tree = zfs.NewTree(&rootNode)
 	for _, f := range zf.source.File {
 		if strings.HasSuffix(f.Name, "/") {
-			parent := path.Dir(path.Dir(f.Name)) + "/"
-			name := path.Base(f.Name)
-			parentZE, ok := zf.entries[parent]
-			parentInode := uint64(0)
-			if ok {
-				parentInode = parentZE.entry.Inode
+			parent = path.Dir(path.Dir(f.Name))
+			name = path.Base(f.Name)
+			node, err := zf.tree.Get(parent)
+			if err != nil {
+				panic(fmt.Sprintf("Error while adding %s - %v", f.Name, err))
 			}
-			inode := fs.GenerateDynamicInode(parentInode, name)
-			ze := ZEntry{
-				zType: fuse.DT_Dir,
-				entry: fuse.Dirent{
-					Inode: inode,
-					Type:  fuse.DT_Dir,
-					Name:  name,
-				},
+			childNode := NewZEntry(node.Entry.Inode, name, fuse.DT_Dir, f)
+			err = zf.tree.Add(f.Name, &childNode, true)
+			if err != nil {
+				log.Println("Error adding ", f.Name, err)
 			}
-			zf.entries[f.Name] = &ze
-			zf.iEntries[inode] = &ze
 		} else {
-			parent := path.Dir(f.Name) + "/"
-			name := path.Base(f.Name)
-			parentZE, ok := zf.entries[parent]
-			if !ok {
-				panic("Parent Inode information not found")
+			parent = path.Dir(f.Name)
+			name = path.Base(f.Name)
+			node, err := zf.tree.Get(parent)
+			if err != nil {
+				panic(fmt.Sprintf("Error while adding %s - %v", f.Name, err))
 			}
-			inode := fs.GenerateDynamicInode(parentZE.entry.Inode, name)
-			ze := ZEntry{
-				zType: fuse.DT_File,
-				entry: fuse.Dirent{
-					Inode: inode,
-					Type:  fuse.DT_File,
-					Name:  name,
-				},
+			childNode := NewZEntry(node.Entry.Inode, name, fuse.DT_File, f)
+			err = zf.tree.Add(f.Name, &childNode, false)
+			if err != nil {
+				log.Println("Error adding ", f.Name, err)
 			}
-			zf.entries[f.Name] = &ze
-			zf.iEntries[inode] = &ze
 		}
 	}
 }
 
-func (zf ZFuse) Root() (fs.Node, error) {
-
-	zf.LoadZip()
-	rootDir := ZEntry{
-		zType: fuse.DT_Dir,
-		entry: fuse.Dirent{
-			Inode: 0,
-			Type:  fuse.DT_Dir,
-			Name:  ".",
-		},
-	}
-	return &rootDir, nil
+func (zf *ZFuse) Root() (fs.Node, error) {
+	zf.Load()
+	v := zf.tree.Root.Value
+	return v, nil
 }
 
 func (ze ZEntry) Attr(ctx context.Context, a *fuse.Attr) error {
-	switch ze.zType {
+
+	log.Println("Attr: ", ze)
+	switch ze.Entry.Type {
 	case fuse.DT_File:
-		a.Inode = ze.entry.Inode
+		a.Inode = ze.Entry.Inode
 		a.Mode = 0o444
-		a.Size = uint64(len(greeting))
+		a.Size = 1024
 		return nil
 	case fuse.DT_Dir:
 		a.Inode = 1
@@ -108,30 +103,24 @@ func (ze ZEntry) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (ze ZEntry) Access(ctx context.Context, req *fuse.AccessRequest) error {
+	log.Println("Access: ", ze)
 	return nil
 }
 
-func (zd ZEntry) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	if name == "hello" {
-		return ZEntry{
-			zType: fuse.DT_File,
-		}, nil
-	}
+func (ze ZEntry) Lookup(ctx context.Context, name string) (fs.Node, error) {
+	log.Println("Lookup: ", ze)
 	return nil, syscall.ENOENT
 }
 
 func (ze ZEntry) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	log.Println("ReadDirAll: ", ze)
 	// TODO return all entries under this path
 	return nil, nil
 }
 
 func (ze ZEntry) ReadAll(ctx context.Context) ([]byte, error) {
-	switch ze.zType {
-	case fuse.DT_File:
-		return []byte(greeting), nil
-	default:
-		return nil, errors.New("Read error not a regular file")
-	}
+	log.Println("ReadAll: ", ze)
+	return nil, nil
 }
 
 func main() {
@@ -166,7 +155,7 @@ func main() {
 	}
 	defer c.Close()
 
-	err = fs.Serve(c, zFuse)
+	err = fs.Serve(c, &zFuse)
 	if err != nil {
 		log.Fatal(err)
 	}
