@@ -19,15 +19,16 @@ import (
 
 type ZFuse struct {
 	source *zip.ReadCloser
-	tree   zfs.Tree[ZEntry]
+	tree   *zfs.Tree[ZEntry]
 }
 
 type ZEntry struct {
 	Entry fuse.Dirent
 	FP    *zip.File
+	tree  *zfs.Tree[ZEntry]
 }
 
-func NewZEntry(parentInode uint64, name string, entType fuse.DirentType, fp *zip.File) ZEntry {
+func NewZEntry(parentInode uint64, name string, entType fuse.DirentType, fp *zip.File, tree *zfs.Tree[ZEntry]) ZEntry {
 	if entType != fuse.DT_Dir && entType != fuse.DT_File {
 		panic("unsupported directory entry type")
 	}
@@ -37,7 +38,8 @@ func NewZEntry(parentInode uint64, name string, entType fuse.DirentType, fp *zip
 			Type:  entType,
 			Name:  name,
 		},
-		FP: fp,
+		FP:   fp,
+		tree: tree,
 	}
 	return node
 }
@@ -46,30 +48,38 @@ func (zf *ZFuse) Load() {
 
 	var parent, name string
 
-	rootNode := NewZEntry(0, ".", fuse.DT_Dir, nil)
-	zf.tree = zfs.NewTree(&rootNode)
+	tree := zfs.NewTree[ZEntry]()
+	zf.tree = &tree
+	rootZEntry := NewZEntry(0, ".", fuse.DT_Dir, nil, zf.tree)
+	rootNode := zfs.NewNode[ZEntry](&rootZEntry, true)
+	err := zf.tree.Add(".", rootNode, rootNode, rootNode.Value.Entry.Inode, rootNode.Value.Entry.Inode, true)
+	if err != nil {
+		panic("error adding root node to the tree")
+	}
 	for _, f := range zf.source.File {
 		if strings.HasSuffix(f.Name, "/") {
 			parent = path.Dir(path.Dir(f.Name))
 			name = path.Base(f.Name)
-			node, err := zf.tree.Get(parent)
+			parentNode, err := zf.tree.Get(parent)
 			if err != nil {
 				panic(fmt.Sprintf("Error while adding %s - %v", f.Name, err))
 			}
-			childNode := NewZEntry(node.Entry.Inode, name, fuse.DT_Dir, f)
-			err = zf.tree.Add(f.Name, &childNode, true)
+			childZEntry := NewZEntry(parentNode.Value.Entry.Inode, name, fuse.DT_Dir, f, zf.tree)
+			childNode := zfs.NewNode[ZEntry](&childZEntry, true)
+			err = zf.tree.Add(f.Name, parentNode, childNode, parentNode.Value.Entry.Inode, childNode.Value.Entry.Inode, true)
 			if err != nil {
 				log.Println("Error adding ", f.Name, err)
 			}
 		} else {
 			parent = path.Dir(f.Name)
 			name = path.Base(f.Name)
-			node, err := zf.tree.Get(parent)
+			parentNode, err := zf.tree.Get(parent)
 			if err != nil {
 				panic(fmt.Sprintf("Error while adding %s - %v", f.Name, err))
 			}
-			childNode := NewZEntry(node.Entry.Inode, name, fuse.DT_File, f)
-			err = zf.tree.Add(f.Name, &childNode, false)
+			childZEntry := NewZEntry(parentNode.Value.Entry.Inode, name, fuse.DT_File, f, zf.tree)
+			childNode := zfs.NewNode[ZEntry](&childZEntry, false)
+			err = zf.tree.Add(f.Name, parentNode, childNode, parentNode.Value.Entry.Inode, childNode.Value.Entry.Inode, false)
 			if err != nil {
 				log.Println("Error adding ", f.Name, err)
 			}
@@ -114,8 +124,16 @@ func (ze ZEntry) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 func (ze ZEntry) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	log.Println("ReadDirAll: ", ze)
-	// TODO return all entries under this path
-	return nil, nil
+	dirents := make([]fuse.Dirent, 0)
+	entries, err := ze.tree.ListByInode(ze.Entry.Inode)
+	if err != nil {
+		log.Println("ReadDirAll: ", err)
+		return nil, err
+	}
+	for _, entry := range entries {
+		dirents = append(dirents, entry.Entry)
+	}
+	return dirents, nil
 }
 
 func (ze ZEntry) ReadAll(ctx context.Context) ([]byte, error) {
