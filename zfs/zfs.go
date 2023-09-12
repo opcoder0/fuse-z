@@ -132,7 +132,10 @@ func (tree *Tree[T]) ListByName(pathName string) ([]*T, error) {
 		}
 		children = node.Children
 	}
-	for _, v := range children {
+	for name, v := range children {
+		if name == "." || name == ".." {
+			continue
+		}
 		retList = append(retList, v.Value)
 	}
 	return retList, nil
@@ -156,7 +159,10 @@ func (tree *Tree[T]) ListByInode(inode uint64) ([]*T, error) {
 	}
 	if node.HasChildren() {
 		children = node.Children
-		for _, v := range children {
+		for name, v := range children {
+			if name == "." || name == ".." {
+				continue
+			}
 			retList = append(retList, v.Value)
 		}
 		return retList, nil

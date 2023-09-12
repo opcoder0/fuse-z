@@ -3,9 +3,9 @@ package main
 import (
 	"archive/zip"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path"
@@ -95,21 +95,24 @@ func (zf *ZFuse) Root() (fs.Node, error) {
 
 func (ze ZEntry) Attr(ctx context.Context, a *fuse.Attr) error {
 
-	log.Println("Attr: ", ze)
-	switch ze.Entry.Type {
-	case fuse.DT_File:
+	if ze.Entry.Name == "." {
 		a.Inode = ze.Entry.Inode
-		a.Mode = 0o444
-		a.Size = 1024
-		return nil
-	case fuse.DT_Dir:
-		a.Inode = 1
 		a.Mode = os.ModeDir | 0o555
 		return nil
-	default:
-		log.Println("Invalid entry type")
-		return errors.New("Invalid entry type")
 	}
+	if ze.FP != nil {
+		stat := ze.FP.FileInfo()
+		a.Inode = ze.Entry.Inode
+		a.Size = uint64(stat.Size())
+		a.Atime = ze.FP.Modified
+		a.Mtime = ze.FP.Modified
+		a.Ctime = ze.FP.Modified
+		a.Mode = stat.Mode()
+		a.Nlink = 1
+		a.Uid = uint32(os.Getuid())
+		a.Gid = uint32(os.Getgid())
+	}
+	return nil
 }
 
 func (ze ZEntry) Access(ctx context.Context, req *fuse.AccessRequest) error {
@@ -118,7 +121,18 @@ func (ze ZEntry) Access(ctx context.Context, req *fuse.AccessRequest) error {
 }
 
 func (ze ZEntry) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	log.Println("Lookup: ", ze)
+	// In the directory from ZEntry look for file with "name" if it exists
+	// return node else ENOENT.
+	entries, err := ze.tree.ListByInode(ze.Entry.Inode)
+	if err != nil {
+		log.Println("No entries found for ", ze, err)
+		return nil, syscall.ENOENT
+	}
+	for _, entry := range entries {
+		if entry.Entry.Name == name {
+			return entry, nil
+		}
+	}
 	return nil, syscall.ENOENT
 }
 
@@ -133,27 +147,43 @@ func (ze ZEntry) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	for _, entry := range entries {
 		dirents = append(dirents, entry.Entry)
 	}
+	log.Println("ReadDirAll returning ", len(dirents), " entries")
 	return dirents, nil
 }
 
 func (ze ZEntry) ReadAll(ctx context.Context) ([]byte, error) {
 	log.Println("ReadAll: ", ze)
-	return nil, nil
+	reader, err := ze.FP.Open()
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func main() {
 
 	var compressedFile string
 	var mountPoint string
+	var debug bool
 
 	flag.StringVar(&compressedFile, "z", "", "path to compressed file")
-	flag.StringVar(&mountPoint, "d", "", "directory to mount compressed file")
+	flag.StringVar(&mountPoint, "m", "", "directory to mount compressed file")
+	flag.BoolVar(&debug, "d", false, "enable debug logging")
 	flag.Parse()
+
 	if compressedFile == "" || mountPoint == "" {
 		fmt.Println()
 		fmt.Println("Required arguments are missing")
 		flag.PrintDefaults()
 		os.Exit(1)
+	}
+
+	if !debug {
+		log.SetOutput(io.Discard)
 	}
 
 	r, err := zip.OpenReader(compressedFile)
