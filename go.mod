@@ -1,4 +1,4 @@
-module github.com/opcoder0/zfuse
+module github.com/opcoder0/zmount
 
 go 1.21.1
 

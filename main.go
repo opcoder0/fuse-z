@@ -14,7 +14,7 @@ import (
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"github.com/opcoder0/zfuse/zfs"
+	"github.com/opcoder0/zmount/zfs"
 )
 
 type ZFuse struct {
