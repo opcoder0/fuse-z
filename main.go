@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -16,8 +17,6 @@ import (
 
 var (
 	gMountPoint    string
-	done           = make(chan struct{})
-	serviceDone    = make(chan struct{})
 	compressedFile string
 	mountPoint     string
 	stopFlag       bool
@@ -25,46 +24,48 @@ var (
 )
 
 const (
-	PidFile = "/tmp/zmount.pid"
-	LogFile = "/tmp/zmount.log"
+	PidFile         = "/tmp/zmount.pid"
+	LogFile         = "/tmp/zmount.log"
+	StartDaemon     = 1
+	StopDaemon      = 2
+	StartForeground = 3
 )
 
 func termHandler(sig os.Signal) error {
 	err := fuse.Unmount(gMountPoint)
-	log.Println("termHandler: Unmounting done: err =", err)
-	err = os.Remove(PidFile)
-	log.Println("termHandler: Remove PID file done: err =", err)
-	// FIXME handle the clean up via daemon's Release function
-	// which makes PidFile cleanup unnecessary.
-	// done <- struct{}{}
-	// log.Println("termHandler: Write to done channel complete")
-	os.Exit(1)
+	if err != nil {
+		log.Println("Error unmounting filesystem:", err)
+	}
 	return err
 }
 
-func startMount(dctx *daemon.Context) {
+func createMount() (*zip.ReadCloser, *fuse.Conn, *zipfs.ZipFS, error) {
+
+	r, err := zip.OpenReader(compressedFile)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	zFuse := zipfs.NewZipFS(r)
+	c, err := fuse.Mount(mountPoint, fuse.FSName("zfuse"), fuse.Subtype("zfuse"))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	gMountPoint = mountPoint
+	return r, c, zFuse, nil
+}
+
+func startMount() {
 
 	var child *os.Process
 	var err error
 
-	if fInfo, err := os.Stat(compressedFile); err != nil {
-		fmt.Println()
-		fmt.Println("compressed file: ", compressedFile, err)
-		flag.PrintDefaults()
-		os.Exit(1)
-	} else if fInfo.IsDir() {
-		fmt.Println("compressed file: ", compressedFile, "must be a file")
-		os.Exit(1)
-	}
-
-	if mInfo, err := os.Stat(mountPoint); err != nil {
-		fmt.Println()
-		fmt.Println("mount point: ", mountPoint, err)
-		flag.PrintDefaults()
-		os.Exit(1)
-	} else if !mInfo.IsDir() {
-		fmt.Println("mount point must be a directory")
-		os.Exit(1)
+	dctx := &daemon.Context{
+		PidFileName: PidFile,
+		PidFilePerm: 0644,
+		LogFileName: LogFile,
+		LogFilePerm: 0640,
+		WorkDir:     "./",
+		Umask:       027,
 	}
 
 	child, err = dctx.Reborn()
@@ -72,97 +73,64 @@ func startMount(dctx *daemon.Context) {
 		log.Fatal("unable to start", err)
 	}
 	if child != nil {
-		// returning from parent
+		// in parent
+		fmt.Fprintf(os.Stderr, "Check %s for zmount logs\n", LogFile)
 		return
 	}
 
-	log.Println("Child Daemon Process: Started")
+	// --- in child process
+	log.Println("Child daemon process has started")
 	defer func() {
 		err = dctx.Release()
-		log.Println("Released daemon resources: err = ", err)
-	}()
-
-	r, err := zip.OpenReader(compressedFile)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	defer r.Close()
-	zFuse := zipfs.NewZipFS(r)
-	c, err := fuse.Mount(mountPoint, fuse.FSName("zfuse"), fuse.Subtype("zfuse"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer c.Close()
-	log.Println("Mounted on: ", mountPoint)
-	gMountPoint = mountPoint
-
-	go func() {
-		err = fs.Serve(c, zFuse)
-		serviceDone <- struct{}{}
 		if err != nil {
-			log.Fatal(err)
+			log.Println("Error releasing daemon resources:", err)
 		}
 	}()
-	err = daemon.ServeSignals()
+	r, c, zFuse, err := createMount()
 	if err != nil {
-		log.Printf("daemon error: %v", err)
+		log.Fatal(err)
 	}
-	log.Println("Waiting on done")
-	select {
-	case <-done:
-		log.Println("done: received")
-	case <-serviceDone:
-		log.Println("serviceDone: received")
+	defer r.Close()
+	defer c.Close()
+	log.Println("Mounted: ", gMountPoint)
+	go func() {
+		err := daemon.ServeSignals()
+		if err != nil {
+			log.Printf("Signal error: %v", err)
+		}
+	}()
+	err = fs.Serve(c, zFuse)
+	if err != nil {
+		log.Fatal(err)
 	}
-	log.Println("Done. Exiting")
 }
 
 func startMountFg() {
 
-	if fInfo, err := os.Stat(compressedFile); err != nil {
-		fmt.Println()
-		fmt.Println("compressed file: ", compressedFile, err)
-		flag.PrintDefaults()
-		os.Exit(1)
-	} else if fInfo.IsDir() {
-		fmt.Println("compressed file: ", compressedFile, "must be a file")
-		os.Exit(1)
-	}
-
-	if mInfo, err := os.Stat(mountPoint); err != nil {
-		fmt.Println()
-		fmt.Println("mount point: ", mountPoint, err)
-		flag.PrintDefaults()
-		os.Exit(1)
-	} else if !mInfo.IsDir() {
-		fmt.Println("mount point must be a directory")
-		os.Exit(1)
-	}
-
-	r, err := zip.OpenReader(compressedFile)
+	r, c, zFuse, err := createMount()
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	defer r.Close()
-	zFuse := zipfs.NewZipFS(r)
-	c, err := fuse.Mount(mountPoint, fuse.FSName("zfuse"), fuse.Subtype("zfuse"))
-	if err != nil {
-		log.Fatal(err)
-	}
 	defer c.Close()
-	log.Println("Mounted on: ", mountPoint)
-	gMountPoint = mountPoint
-
+	log.Println("Mounted: ", gMountPoint)
 	err = fs.Serve(c, zFuse)
-	serviceDone <- struct{}{}
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func stopMount(dctx *daemon.Context) {
+func stopMount() {
+
+	dctx := &daemon.Context{
+		PidFileName: PidFile,
+		PidFilePerm: 0644,
+		LogFileName: LogFile,
+		LogFilePerm: 0640,
+		WorkDir:     "./",
+		Umask:       027,
+	}
+
 	if len(daemon.ActiveFlags()) > 0 {
 		d, err := dctx.Search()
 		if err != nil {
@@ -176,6 +144,44 @@ func stopMount(dctx *daemon.Context) {
 	}
 }
 
+// check validates inputs and returns the operation to run
+// if validation fails it returns an error
+func check() (int, error) {
+
+	var op int
+
+	if stopFlag {
+		if compressedFile != "" || mountPoint != "" {
+			return -1, errors.New("options stop and flags -z and -m are mutually exclusive")
+		} else {
+			op = StopDaemon
+		}
+	} else {
+		if compressedFile != "" || mountPoint != "" {
+			if foreground {
+				op = StartForeground
+			} else {
+				op = StartDaemon
+			}
+		} else {
+			return -1, errors.New("required arguments are missing")
+		}
+
+		if fInfo, err := os.Stat(compressedFile); err != nil {
+			return -1, fmt.Errorf("compressed file: %v", err)
+		} else if fInfo.IsDir() {
+			return -1, fmt.Errorf("%s not a file", compressedFile)
+		}
+
+		if mInfo, err := os.Stat(mountPoint); err != nil {
+			return -1, fmt.Errorf("mount point: %v", err)
+		} else if !mInfo.IsDir() {
+			return -1, errors.New("mount point must be a directory")
+		}
+	}
+	return op, nil
+}
+
 func main() {
 
 	flag.StringVar(&compressedFile, "z", "", "path to compressed file")
@@ -184,37 +190,20 @@ func main() {
 	flag.BoolVar(&stopFlag, "stop", false, "stop and unmount")
 	flag.Parse()
 	daemon.AddCommand(daemon.BoolFlag(&stopFlag), syscall.SIGTERM, termHandler)
-	dctx := &daemon.Context{
-		PidFileName: PidFile,
-		PidFilePerm: 0644,
-		LogFileName: LogFile,
-		LogFilePerm: 0640,
-		WorkDir:     "./",
-		Umask:       027,
+	op, err := check()
+	if err != nil {
+		fmt.Println(err)
+		flag.PrintDefaults()
+		os.Exit(1)
 	}
-
-	// can't specify both stop and mount together
-	if stopFlag {
-		if compressedFile != "" || mountPoint != "" {
-			fmt.Println()
-			fmt.Println("Options stop and flags -z and -m are mutually exclusive")
-			flag.PrintDefaults()
-			os.Exit(1)
-		} else {
-			stopMount(dctx)
-		}
-	} else {
-		if compressedFile != "" || mountPoint != "" {
-			if foreground {
-				startMountFg()
-			} else {
-				startMount(dctx)
-			}
-		} else {
-			fmt.Println()
-			fmt.Println("Required arguments are missing")
-			flag.PrintDefaults()
-			os.Exit(1)
-		}
+	switch op {
+	case StartDaemon:
+		startMount()
+	case StopDaemon:
+		stopMount()
+	case StartForeground:
+		startMountFg()
+	default:
+		panic("unrecognized operation")
 	}
 }
