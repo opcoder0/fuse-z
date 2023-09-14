@@ -110,6 +110,10 @@ func (tree *Tree[T]) Get(pathName string) (*Node[T], error) {
 	return tree.getNodeByName(pathName)
 }
 
+func (tree *Tree[T]) GetByInode(ino uint64) (*Node[T], error) {
+	return tree.getNodeByInode(ino, tree.Root, nil)
+}
+
 func (tree *Tree[T]) ListByName(pathName string) ([]*T, error) {
 
 	var children map[string]*Node[T]
