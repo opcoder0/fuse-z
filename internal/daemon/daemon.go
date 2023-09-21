@@ -18,8 +18,6 @@ type Daemon struct {
 	ctx     *daemon.Context
 }
 
-var theDaemon *Daemon
-
 func Start(pidFile, logFile string, stopFlag bool, termHandler func(os.Signal) error, mountCallback, serveCallback func()) error {
 
 	var child *os.Process
@@ -38,29 +36,23 @@ func Start(pidFile, logFile string, stopFlag bool, termHandler func(os.Signal) e
 		Umask:       027,
 	}
 
-	theDaemon = &Daemon{
-		pidFile: pidFile,
-		logFile: logFile,
-		ctx:     dctx,
-	}
-
 	daemon.AddCommand(daemon.BoolFlag(&stopFlag), syscall.SIGTERM, termHandler)
 
-	child, err = theDaemon.ctx.Reborn()
+	child, err = dctx.Reborn()
 	if err != nil {
 		log.Printf("Unable to start. Error: %v", err)
 		os.Exit(1)
 	}
 	if child != nil {
 		// in parent
-		fmt.Fprintf(os.Stderr, "Check %s for zmount logs\n", theDaemon.logFile)
+		fmt.Fprintf(os.Stderr, "Check %s for zmount logs\n", logFile)
 		return nil
 	}
 
 	// --- in child process
 	log.Println("Child daemon process has started")
 	defer func() {
-		err = theDaemon.ctx.Release()
+		err = dctx.Release()
 		if err != nil {
 			log.Println("Error releasing daemon resources:", err)
 		}
