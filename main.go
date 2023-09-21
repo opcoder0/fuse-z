@@ -83,6 +83,6 @@ func main() {
 			<-zipFS.Done
 		}
 	} else {
-		zipfs.Unmount()
+		zipfs.Unmount(mountPoint)
 	}
 }

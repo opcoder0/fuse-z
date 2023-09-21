@@ -10,18 +10,15 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 	zdaemon "github.com/opcoder0/zmount/internal/daemon"
+	"github.com/opcoder0/zmount/internal/utils"
 	"github.com/opcoder0/zmount/internal/zfs"
-)
-
-const (
-	PidFile = "/tmp/zmount.pid"
-	LogFile = "/tmp/zmount.log"
 )
 
 type ZipFS struct {
@@ -118,7 +115,13 @@ func (zipFS *ZipFS) Mount() {
 		}()
 	} else {
 		zipFS.daemon = true
-		err = zdaemon.Start(PidFile, LogFile, false, zipFS.termHandler, zipFS.fuseMount, zipFS.serve)
+		genFilename, err := utils.GenFilenameFromMountPath(zipFS.mountPoint)
+		if err != nil {
+			log.Fatal("Error generating pid and logfile names", err)
+		}
+		pidFile := filepath.Join("/tmp", genFilename+".pid")
+		logFile := filepath.Join("/tmp", genFilename+".log")
+		err = zdaemon.Start(pidFile, logFile, false, zipFS.termHandler, zipFS.fuseMount, zipFS.serve)
 		if err != nil {
 			log.Fatal("Error starting daemon", err)
 		}
@@ -148,8 +151,11 @@ func (zipFS *ZipFS) fuseUnmount() {
 	}
 }
 
-func Unmount() {
-	zdaemon.Stop()
+func Unmount(mountPoint string) {
+	zipFS := ZipFS{
+		mountPoint: mountPoint,
+	}
+	zdaemon.Stop(mountPoint, zipFS.termHandler)
 }
 
 func NewZipEntry(parentInode uint64, name string, entType fuse.DirentType, tree *zfs.Tree[ZipEntry]) *ZipEntry {

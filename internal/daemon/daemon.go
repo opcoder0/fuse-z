@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"syscall"
 
+	"github.com/opcoder0/zmount/internal/utils"
 	"github.com/sevlyar/go-daemon"
 )
 
@@ -74,9 +76,26 @@ func Start(pidFile, logFile string, stopFlag bool, termHandler func(os.Signal) e
 	return nil
 }
 
-func Stop() {
+func Stop(mountPoint string, termHandler func(os.Signal) error) {
+	stopFlag := true
+	daemon.AddCommand(daemon.BoolFlag(&stopFlag), syscall.SIGTERM, termHandler)
+	genFilename, err := utils.GenFilenameFromMountPath(mountPoint)
+	if err != nil {
+		log.Fatal("Error generating pid and logfile names", err)
+	}
+	pidFile := filepath.Join("/tmp", genFilename+".pid")
+	logFile := filepath.Join("/tmp", genFilename+".log")
+	dctx := &daemon.Context{
+		PidFileName: pidFile,
+		PidFilePerm: 0644,
+		LogFileName: logFile,
+		LogFilePerm: 0640,
+		WorkDir:     "./",
+		Umask:       027,
+	}
+
 	if len(daemon.ActiveFlags()) > 0 {
-		d, err := theDaemon.ctx.Search()
+		d, err := dctx.Search()
 		if err != nil {
 			log.Fatalf("Unable send signal to the daemon: %s", err.Error())
 		}
